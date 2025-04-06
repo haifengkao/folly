@@ -26,7 +26,6 @@
 //  Support:
 //    libstdc++ via libgcc libsupc++
 //    libc++ via llvm libcxxabi
-//    libc++ on freebsd via libcxxrt
 //    win32 via msvc crt
 //
 //  Both libstdc++ and libc++ are based on cxxabi but they are not identical.
@@ -41,7 +40,7 @@
 
 #endif // defined(__GLIBCXX__)
 
-#if defined(_LIBCPP_VERSION) && !defined(__FreeBSD__)
+#if defined(_LIBCPP_VERSION)
 
 //  https://github.com/llvm/llvm-project/blob/llvmorg-11.0.1/libcxxabi/src/cxa_exception.h
 //  https://github.com/llvm/llvm-project/blob/llvmorg-11.0.1/libcxxabi/src/private_typeinfo.h
@@ -51,35 +50,7 @@
 
 namespace __cxxabiv1 {
 
-//  the definition until llvm v10.0.0-rc2
-struct __folly_cxa_exception_sans_reserve {
-#if defined(__LP64__) || defined(_WIN64) || defined(_LIBCXXABI_ARM_EHABI)
-  size_t referenceCount;
-#endif
-  std::type_info* exceptionType;
-  void (*exceptionDestructor)(void*);
-  void (*unexpectedHandler)();
-  std::terminate_handler terminateHandler;
-  __folly_cxa_exception_sans_reserve* nextException;
-  int handlerCount;
-#if defined(_LIBCXXABI_ARM_EHABI)
-  __folly_cxa_exception_sans_reserve* nextPropagatingException;
-  int propagationCount;
-#else
-  int handlerSwitchValue;
-  const unsigned char* actionRecord;
-  const unsigned char* languageSpecificData;
-  void* catchTemp;
-  void* adjustedPtr;
-#endif
-#if !defined(__LP64__) && !defined(_WIN64) && !defined(_LIBCXXABI_ARM_EHABI)
-  size_t referenceCount;
-#endif
-  _Unwind_Exception unwindHeader;
-};
-
-//  the definition since llvm v10.0.0-rc2
-struct __folly_cxa_exception_with_reserve {
+struct __folly_cxa_exception {
 #if defined(__LP64__) || defined(_WIN64) || defined(_LIBCXXABI_ARM_EHABI)
   void* reserve;
   size_t referenceCount;
@@ -88,10 +59,10 @@ struct __folly_cxa_exception_with_reserve {
   void (*exceptionDestructor)(void*);
   void (*unexpectedHandler)();
   std::terminate_handler terminateHandler;
-  __folly_cxa_exception_with_reserve* nextException;
+  __folly_cxa_exception* nextException;
   int handlerCount;
 #if defined(_LIBCXXABI_ARM_EHABI)
-  __folly_cxa_exception_with_reserve* nextPropagatingException;
+  __folly_cxa_exception* nextPropagatingException;
   int propagationCount;
 #else
   int handlerSwitchValue;
@@ -122,35 +93,7 @@ class __folly_shim_type_info : public std::type_info {
 
 namespace abi = __cxxabiv1;
 
-#endif // defined(_LIBCPP_VERSION) && !defined(__FreeBSD__)
-
-#if defined(__FreeBSD__)
-
-//  https://github.com/freebsd/freebsd-src/blob/release/13.0.0/contrib/libcxxrt/cxxabi.h
-//  https://github.com/freebsd/freebsd-src/blob/release/13.0.0/contrib/libcxxrt/typeinfo.h
-
-#include <cxxabi.h>
-
-namespace __cxxabiv1 {
-
-class __folly_shim_type_info {
- public:
-  virtual ~__folly_shim_type_info() = 0;
-  virtual bool __is_pointer_p() const = 0;
-  virtual bool __is_function_p() const = 0;
-  virtual bool __do_catch(
-      std::type_info const* thrown_type,
-      void** thrown_object,
-      unsigned outer) const = 0;
-  virtual bool __do_upcast(
-      std::type_info const* target, void** thrown_object) const = 0;
-};
-
-} // namespace __cxxabiv1
-
-namespace abi = __cxxabiv1;
-
-#endif // defined(__FreeBSD__)
+#endif // defined(_LIBCPP_VERSION)
 
 #if defined(_WIN32)
 
@@ -192,68 +135,10 @@ void* exception_ptr_get_object(
 
 #endif // defined(__GLIBCXX__)
 
-#if defined(_LIBCPP_VERSION) && !defined(__FreeBSD__)
+#if defined(_LIBCPP_VERSION)
 
 static void* cxxabi_get_object(std::exception_ptr const& ptr) noexcept {
   return reinterpret_cast<void* const&>(ptr);
-}
-
-static bool cxxabi_cxa_exception_sans_reserve() noexcept {
-  // detect and cache the layout of __cxa_exception in the loaded libc++abi
-  //
-  // for 32-bit arm-ehabi llvm ...
-  //
-  // before v5.0.1, _Unwind_Exception is alignas(4)
-  // as of v5.0.1, _Unwind_Exception is alignas(8)
-  // _Unwind_Exception is the last field in __cxa_exception
-  //
-  // before v10.0.0-rc2, __cxa_exception has 4b padding before the unwind field
-  // as of v10.0.0-rc2, __cxa_exception moves the 4b padding to the start in a
-  // field called reserve
-  //
-  // before 32-bit arm-ehabi llvm v10.0.0-rc2, the reserve field does not exist
-  // in the struct explicitly but the refcount field is there instead due to
-  // implicit padding
-  //
-  // before 32-bit arm-ehabi llvm v5.0.1, and before 64-bit llvm v10.0.0-rc2,
-  // the reserve field is before the struct start and so is presumably before
-  // the struct allocation and so must not be accessed
-  //
-  // __cxa_allocate_exception zero-fills the __cxa_exception before __cxa_throw
-  // assigns fields so if, after incref, the refcount field is still zero, then
-  // the runtime llvm is at least v5.0.1 and before v10.00-rc2 and then all the
-  // fields except for the unwind field are shifted up by 4b
-  //
-  // prefer optimistic concurrency over pessimistic concurrency
-  static std::atomic<int> cache{};
-  if (auto value = cache.load(std::memory_order_relaxed)) {
-    return value > 0;
-  }
-  auto object = abi::__cxa_allocate_exception(0);
-  abi::__cxa_increment_exception_refcount(object);
-  auto exception =
-      static_cast<abi::__folly_cxa_exception_sans_reserve*>(object) - 1;
-  auto result = exception->referenceCount == 1;
-  assert(
-      result ||
-      (static_cast<abi::__folly_cxa_exception_with_reserve*>(object) - 1)
-              ->referenceCount == 1);
-  abi::__cxa_free_exception(object); // no need for decref
-  cache.store(result ? 1 : -1, std::memory_order_relaxed);
-  return result;
-}
-
-template <typename F>
-static decltype(auto) cxxabi_with_cxa_exception(void* object, F f) {
-  if (cxxabi_cxa_exception_sans_reserve()) {
-    using cxa_exception = abi::__folly_cxa_exception_sans_reserve;
-    auto exception = object ? static_cast<cxa_exception*>(object) - 1 : nullptr;
-    return f(exception);
-  } else {
-    using cxa_exception = abi::__folly_cxa_exception_with_reserve;
-    auto exception = object ? static_cast<cxa_exception*>(object) - 1 : nullptr;
-    return f(exception);
-  }
 }
 
 std::type_info const* exception_ptr_get_type(
@@ -262,9 +147,8 @@ std::type_info const* exception_ptr_get_type(
     return nullptr;
   }
   auto object = cxxabi_get_object(ptr);
-  return cxxabi_with_cxa_exception(object, [](auto exception) { //
-    return exception->exceptionType;
-  });
+  auto exception = static_cast<abi::__folly_cxa_exception*>(object) - 1;
+  return exception->exceptionType;
 }
 
 void* exception_ptr_get_object(
@@ -279,33 +163,7 @@ void* exception_ptr_get_object(
   return !target || starget->can_catch(type, object) ? object : nullptr;
 }
 
-#endif // defined(_LIBCPP_VERSION) && !defined(__FreeBSD__)
-
-#if defined(__FreeBSD__)
-
-std::type_info const* exception_ptr_get_type(
-    std::exception_ptr const& ptr) noexcept {
-  if (!ptr) {
-    return nullptr;
-  }
-  auto object = reinterpret_cast<void* const&>(ptr);
-  auto exception = static_cast<abi::__cxa_exception*>(object) - 1;
-  return exception->exceptionType;
-}
-
-void* exception_ptr_get_object(
-    std::exception_ptr const& ptr,
-    std::type_info const* const target) noexcept {
-  if (!ptr) {
-    return nullptr;
-  }
-  auto object = reinterpret_cast<void* const&>(ptr);
-  auto type = exception_ptr_get_type(ptr);
-  auto starget = reinterpret_cast<abi::__folly_shim_type_info const*>(target);
-  return !target || starget->__do_catch(type, &object, 1) ? object : nullptr;
-}
-
-#endif // defined(__FreeBSD__)
+#endif // defined(_LIBCPP_VERSION)
 
 #if defined(_WIN32)
 
