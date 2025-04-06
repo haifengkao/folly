@@ -5,13 +5,14 @@
 
 Pod::Spec.new do |spec|
     spec.name = 'Flipper-Folly'
-    spec.version = '2.6.11'
+    spec.version = '2.6.12'
     spec.license = { :type => 'Apache License, Version 2.0' }
     spec.homepage = 'https://github.com/facebook/folly'
     spec.summary = 'An open-source C++ library developed and used at Facebook.'
     spec.authors = 'Facebook'
     spec.source = { :git => 'https://github.com/haifengkao/folly.git', :tag => "2.6.11"}
     spec.module_name = 'folly'
+    spec.static_framework = true
     spec.dependency 'Flipper-Boost-iOSX'
     spec.dependency 'Flipper-Glog'
     spec.dependency 'Flipper-DoubleConversion'
